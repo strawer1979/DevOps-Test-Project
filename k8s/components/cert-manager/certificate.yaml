@@ -1,0 +1,15 @@
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: shopsimple-tls
+  namespace: shopsimple
+spec:
+  secretName: shopsimple-tls
+  issuerRef:
+    kind: Issuer
+    name: selfsigned-issuer
+  dnsNames:
+    - shopsimple.example.com
+    - "*.shopsimple.example.com"
+  duration: 2160h
+  renewBefore: 360h

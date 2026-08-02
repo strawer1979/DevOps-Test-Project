@@ -1,0 +1,58 @@
+graph TB
+    subgraph Source["Source Control"]
+        Git[Git Repository]
+    end
+
+    subgraph Harness["Harness CI/CD"]
+        subgraph InfraPipeline["Infrastructure Pipeline"]
+            Validate[Validate]
+            Plan[Plan]
+            Approve[Approval Gate]
+            Apply[Apply]
+            Verify[Verify]
+        end
+
+        subgraph ServicePipeline["Service Pipeline"]
+            Build[Build Images]
+            Test[Run Tests]
+            Scan[Security Scan]
+            Push[Push to ECR]
+            DeployDev[Deploy to Dev]
+            DeployTest[Deploy to Test]
+            DeployPerf[Deploy to Perf]
+            DeployStaging[Deploy to Staging]
+            DeployProd[Deploy to Prod]
+        end
+    end
+
+    subgraph AWS["AWS Infrastructure"]
+        EKS[EKS Cluster]
+        ECR[ECR Registry]
+        TFState[Terraform State]
+    end
+
+    Git -->|Push/PR| Harness
+    Validate --> Plan
+    Plan --> Approve
+    Approve --> Apply
+    Apply --> Verify
+    Verify --> TFState
+
+    Build --> Test
+    Test --> Scan
+    Scan --> Push
+    Push --> ECR
+    Push --> DeployDev
+    DeployDev --> DeployTest
+    DeployTest --> DeployPerf
+    DeployPerf --> DeployStaging
+    DeployStaging --> DeployProd
+    DeployDev --> EKS
+    DeployTest --> EKS
+    DeployPerf --> EKS
+    DeployStaging --> EKS
+    DeployProd --> EKS
+
+    style Source fill:#e1f5fe
+    style Harness fill:#fff3e0
+    style AWS fill:#e8f5e9

@@ -1,0 +1,11 @@
+{
+  "testEnvironment": "node",
+  "transform": {},
+  "moduleFileExtensions": ["js", "mjs"],
+  "testMatch": ["**/__tests__/**/*.test.js"],
+  "collectCoverageFrom": [
+    "src/**/*.js"
+  ],
+  "verbose": true,
+  "testTimeout": 10000
+}

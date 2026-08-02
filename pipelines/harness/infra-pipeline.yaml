@@ -1,0 +1,340 @@
+pipeline:
+  name: ShopSimple Infrastructure Pipeline
+  identifier: shopsimple_infra_pipeline
+  projectIdentifier: shopsimple
+  orgIdentifier: default
+  tags:
+    - infra
+    - terraform
+  description: Deploys Terraform infrastructure for ShopSimple
+
+  variables:
+    - name: environment
+      type: String
+      required: true
+      default: dev
+      description: Target environment (dev/staging/prod)
+    - name: region
+      type: String
+      required: true
+      default: us-east-1
+      description: AWS region for infrastructure
+    - name: action
+      type: String
+      required: true
+      default: plan
+      description: Terraform action (plan/apply/destroy)
+    - name: tf_state_bucket
+      type: String
+      required: true
+      default: shopsimple-tf-state
+      description: S3 bucket for Terraform state
+
+  stages:
+    # ============================================
+    # Stage 1: Validate
+    # ============================================
+    - stage:
+        name: Validate
+        identifier: validate
+        description: Validate Terraform configuration
+        type: Deployment
+        spec:
+          deploymentType: Terraform
+          execution:
+            steps:
+              - step:
+                  name: Terraform Format Check
+                  identifier: tf_fmt_check
+                  type: TerraformPlan
+                  timeout: 5m
+                  spec:
+                    command: fmt
+                    flags: "-check -recursive"
+                    terraformVersion: 1.5.0
+                    configFiles:
+                      - path: infra/
+                    backendConfig:
+                      - key: bucket
+                        value: <+variables.tf_state_bucket>
+                      - key: region
+                        value: <+variables.region>
+                      - key: key
+                        value: <+variables.environment>/infra.tfstate
+
+              - step:
+                  name: Terraform Validate
+                  identifier: tf_validate
+                  type: TerraformPlan
+                  timeout: 5m
+                  spec:
+                    command: validate
+                    terraformVersion: 1.5.0
+                    configFiles:
+                      - path: infra/
+
+              - step:
+                  name: TFLint
+                  identifier: tflint
+                  type: Command
+                  timeout: 10m
+                  spec:
+                    shell: Bash
+                    command: |
+                      cd infra/
+                      tflint --init
+                      tflint --module
+                      tflint --var-file=environments/<+variables.environment>.tfvars
+                    envVariables:
+                      AWS_REGION: <+variables.region>
+
+        failureStrategies:
+          - onFailure:
+              action:
+                type: Retry
+                spec:
+                  maxRetries: 1
+                  retryInterval: 2m
+
+    # ============================================
+    # Stage 2: Plan
+    # ============================================
+    - stage:
+        name: Plan
+        identifier: plan
+        description: Generate Terraform plan
+        type: Deployment
+        spec:
+          deploymentType: Terraform
+          execution:
+            steps:
+              - step:
+                  name: Terraform Init
+                  identifier: tf_init
+                  type: TerraformPlan
+                  timeout: 10m
+                  spec:
+                    command: init
+                    terraformVersion: 1.5.0
+                    configFiles:
+                      - path: infra/
+                    backendConfig:
+                      - key: bucket
+                        value: <+variables.tf_state_bucket>
+                      - key: region
+                        value: <+variables.region>
+                      - key: key
+                        value: <+variables.environment>/infra.tfstate
+
+              - step:
+                  name: Terraform Plan
+                  identifier: tf_plan
+                  type: TerraformPlan
+                  timeout: 30m
+                  spec:
+                    command: plan
+                    flags: "-out=tfplan -var-file=environments/<+variables.environment>.tfvars -var=environment=<+variables.environment> -var=region=<+variables.region>"
+                    terraformVersion: 1.5.0
+                    configFiles:
+                      - path: infra/
+
+              - step:
+                  name: Save Plan to Artifact
+                  identifier: save_plan
+                  type: ArtifactCollector
+                  spec:
+                    artifacts:
+                      - name: tfplan
+                        type: TerraformPlan
+                        identifier: tfplan
+                        spec:
+                          filePath: tfplan
+
+              - step:
+                  name: Post Plan Summary
+                  identifier: post_summary
+                  type: Command
+                  timeout: 2m
+                  spec:
+                    shell: Bash
+                    command: |
+                      echo "========================================"
+                      echo "Terraform Plan Summary"
+                      echo "========================================"
+                      echo "Environment: <+variables.environment>"
+                      echo "Region: <+variables.region>"
+                      echo "Action: <+variables.action>"
+                      echo "========================================"
+                      cat tfplan | head -100
+
+    # ============================================
+    # Stage 3: Approval (for staging/prod)
+    # ============================================
+    - stage:
+        name: Approval
+        identifier: approval
+        description: Manual approval for staging/prod environments
+        type: Approval
+        spec:
+          execution:
+            steps:
+              - step:
+                  name: Manual Approval
+                  identifier: manual_approval
+                  type: HarnessApproval
+                  timeout: 24h
+                  spec:
+                    approvalMessage: "Approve Terraform changes for <+variables.environment>"
+                    approvers:
+                      userGroups:
+                        - admin-group
+                    includePipelineExecutionHistory: true
+        when:
+          stageConditionType: APPROVAL
+          condition: <+variables.environment> == "staging" || <+variables.environment> == "prod"
+
+    # ============================================
+    # Stage 4: Apply
+    # ============================================
+    - stage:
+        name: Apply
+        identifier: apply
+        description: Apply Terraform changes
+        type: Deployment
+        spec:
+          deploymentType: Terraform
+          execution:
+            steps:
+              - step:
+                  name: Terraform Apply
+                  identifier: tf_apply
+                  type: TerraformApply
+                  timeout: 1h
+                  spec:
+                    command: apply
+                    flags: "-auto-approve tfplan"
+                    terraformVersion: 1.5.0
+                    configFiles:
+                      - path: infra/
+                    backendConfig:
+                      - key: bucket
+                        value: <+variables.tf_state_bucket>
+                      - key: region
+                        value: <+variables.region>
+                      - key: key
+                        value: <+variables.environment>/infra.tfstate
+
+              - step:
+                  name: Post Apply Summary
+                  identifier: post_apply
+                  type: Command
+                  timeout: 2m
+                  spec:
+                    shell: Bash
+                  spec:
+                    command: |
+                      echo "========================================"
+                      echo "Terraform Apply Complete"
+                      echo "========================================"
+                      echo "Environment: <+variables.environment>"
+                      echo "Status: SUCCESS"
+                      echo "========================================"
+        when:
+          stageConditionType: CONDITION
+          condition: <+variables.action> == "apply"
+
+    # ============================================
+    # Stage 5: Verify
+    # ============================================
+    - stage:
+        name: Verify
+        identifier: verify
+        description: Smoke test infrastructure outputs
+        type: Deployment
+        spec:
+          deploymentType: Custom
+          execution:
+            steps:
+              - step:
+                  name: Check Outputs
+                  identifier: check_outputs
+                  type: Command
+                  timeout: 5m
+                  spec:
+                    shell: Bash
+                    command: |
+                      cd infra/
+                      terraform output -json > outputs.json
+                      cat outputs.json
+                    envVariables:
+                      AWS_REGION: <+variables.region>
+
+              - step:
+                  name: Verify S3 Bucket
+                  identifier: verify_s3
+                  type: Command
+                  timeout: 5m
+                  spec:
+                    shell: Bash
+                    command: |
+                      BUCKET_NAME=$(terraform output -raw s3_bucket_name 2>/dev/null)
+                      if [ -n "$BUCKET_NAME" ]; then
+                        aws s3 ls s3://$BUCKET_NAME --region <+variables.region>
+                        echo "S3 Bucket verified: $BUCKET_NAME"
+                      else
+                        echo "No S3 bucket to verify"
+                      fi
+
+              - step:
+                  name: Verify RDS
+                  identifier: verify_rds
+                  type: Command
+                  timeout: 10m
+                  spec:
+                    shell: Bash
+                    command: |
+                      RDS_ENDPOINT=$(terraform output -raw rds_endpoint 2>/dev/null)
+                      if [ -n "$RDS_ENDPOINT" ]; then
+                        echo "RDS Endpoint: $RDS_ENDPOINT"
+                        aws rds describe-db-instances --db-instance-identifier $(terraform output -raw rds_instance_id) --region <+variables.region> --query 'DBInstances[0].DBInstanceStatus'
+                      else
+                        echo "No RDS instance to verify"
+                      fi
+
+              - step:
+                  name: Verify EKS
+                  identifier: verify_eks
+                  type: Command
+                  timeout: 10m
+                  spec:
+                    shell: Bash
+                    command: |
+                      EKS_CLUSTER=$(terraform output -raw eks_cluster_name 2>/dev/null)
+                      if [ -n "$EKS_CLUSTER" ]; then
+                        aws eks describe-cluster --name $EKS_CLUSTER --region <+variables.region> --query 'cluster.status'
+                        aws eks update-kubeconfig --name $EKS_CLUSTER --region <+variables.region>
+                        kubectl get nodes
+                      else
+                        echo "No EKS cluster to verify"
+                      fi
+
+        failureStrategies:
+          - onFailure:
+              action:
+                type: StageRollback
+
+  notifications:
+    - name: Pipeline Completion
+      pipelineEvents:
+        - event:
+            - PipelineComplete
+            - PipelineFailed
+      notificationRule:
+        identifier: default_notifications
+        actions:
+          - name: Email Notification
+            type: Email
+            spec:
+              to:
+                - ops-team@shopsimple.com
+              subject: "ShopSimple Infra Pipeline: <+pipeline.stagestatus>"

@@ -1,0 +1,53 @@
+graph TB
+    subgraph Client["Client Layer"]
+        Browser[Web Browser]
+    end
+
+    subgraph Frontend["Frontend (React)"]
+        UI[React SPA]
+        Vite[Vite Dev Server]
+        Nginx[Nginx Reverse Proxy]
+    end
+
+    subgraph API["API Layer"]
+        Express[Express.js Server]
+        Routes[Route Handlers]
+        Middleware[Middleware Stack]
+    end
+
+    subgraph Worker["Worker Layer"]
+        BullWorker[BullMQ Worker]
+        Jobs[Job Handlers]
+    end
+
+    subgraph Data["Data Layer"]
+        PG[(PostgreSQL)]
+        Redis[(Redis)]
+        S3[(S3)]
+    end
+
+    subgraph MessageQueue["Message Queue"]
+        QueueNode[BullMQ Queue]
+    end
+
+    Browser -->|HTTPS| Nginx
+    Nginx --> UI
+    Nginx -->|/api/*| Express
+    UI -->|HTTP| Express
+    Express --> Routes
+    Routes --> Middleware
+    Express -->|Read/Write| PG
+    Express -->|Cache/Cart| Redis
+    Express -->|Images| S3
+    Express -->|Enqueue| QueueNode
+    QueueNode --> BullWorker
+    BullWorker --> Jobs
+    Jobs -->|Update Status| PG
+    Jobs -->|Send Email| SMTP[External SMTP]
+
+    style Client fill:#e1f5fe
+    style Frontend fill:#f3e5f5
+    style API fill:#fff3e0
+    style Worker fill:#e8f5e9
+    style Data fill:#fce4ec
+    style MessageQueue fill:#fff9c4

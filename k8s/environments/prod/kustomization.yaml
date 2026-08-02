@@ -1,0 +1,147 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: shopsimple-prod
+
+resources:
+  - ../../base
+  - pdb-api.yaml
+  - pdb-frontend.yaml
+
+components:
+  - ../../components/cert-manager
+  - ../../components/hpa
+  - ../../components/monitoring
+
+labels:
+  - pairs:
+      app.kubernetes.io/environment: prod
+
+replicas:
+  - name: frontend
+    count: 3
+  - name: api
+    count: 5
+  - name: worker
+    count: 3
+
+patches:
+  - patch: |
+      apiVersion: v1
+      kind: ConfigMap
+      metadata:
+        name: shopsimple-config
+      data:
+        s3_bucket: shopsimple-prod-images
+        log_level: warn
+    target:
+      kind: ConfigMap
+      name: shopsimple-config
+  - patch: |
+      apiVersion: apps/v1
+      kind: Deployment
+      metadata:
+        name: frontend
+        annotations:
+          external-dns.alpha.kubernetes.io/hostname: shopsimple.example.com
+          external-dns.alpha.kubernetes.io/ttl: "60"
+      spec:
+        template:
+          spec:
+            affinity:
+              podAntiAffinity:
+                preferredDuringSchedulingIgnoredDuringExecution:
+                  - weight: 100
+                    podAffinityTerm:
+                      labelSelector:
+                        matchLabels:
+                          app.kubernetes.io/name: frontend
+                          app.kubernetes.io/component: frontend
+                      topologyKey: kubernetes.io/hostname
+            containers:
+              - name: frontend
+                resources:
+                  requests:
+                    cpu: "200m"
+                    memory: "512Mi"
+                  limits:
+                    cpu: "500m"
+                    memory: "1Gi"
+    target:
+      kind: Deployment
+      name: frontend
+  - patch: |
+      apiVersion: apps/v1
+      kind: Deployment
+      metadata:
+        name: api
+        annotations:
+          external-dns.alpha.kubernetes.io/hostname: api.shopsimple.example.com
+          external-dns.alpha.kubernetes.io/ttl: "60"
+      spec:
+        template:
+          spec:
+            affinity:
+              podAntiAffinity:
+                preferredDuringSchedulingIgnoredDuringExecution:
+                  - weight: 100
+                    podAffinityTerm:
+                      labelSelector:
+                        matchLabels:
+                          app.kubernetes.io/name: api
+                          app.kubernetes.io/component: api
+                      topologyKey: kubernetes.io/hostname
+            containers:
+              - name: api
+                resources:
+                  requests:
+                    cpu: "500m"
+                    memory: "1Gi"
+                  limits:
+                    cpu: "1000m"
+                    memory: "2Gi"
+    target:
+      kind: Deployment
+      name: api
+  - patch: |
+      apiVersion: apps/v1
+      kind: Deployment
+      metadata:
+        name: worker
+      spec:
+        template:
+          spec:
+            affinity:
+              podAntiAffinity:
+                preferredDuringSchedulingIgnoredDuringExecution:
+                  - weight: 100
+                    podAffinityTerm:
+                      labelSelector:
+                        matchLabels:
+                          app.kubernetes.io/name: worker
+                          app.kubernetes.io/component: worker
+                      topologyKey: kubernetes.io/hostname
+            containers:
+              - name: worker
+                resources:
+                  requests:
+                    cpu: "500m"
+                    memory: "1Gi"
+                  limits:
+                    cpu: "1000m"
+                    memory: "2Gi"
+    target:
+      kind: Deployment
+      name: worker
+  - patch: |
+      apiVersion: cert-manager.io/v1
+      kind: Certificate
+      metadata:
+        name: shopsimple-tls
+      spec:
+        issuerRef:
+          kind: ClusterIssuer
+          name: letsencrypt-prod
+    target:
+      kind: Certificate
+      name: shopsimple-tls

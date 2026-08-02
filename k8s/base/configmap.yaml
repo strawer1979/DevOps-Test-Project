@@ -1,0 +1,10 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: shopsimple-config
+  namespace: shopsimple
+data:
+  api_url: "http://api:4000"
+  s3_bucket: "shopsimple-dev-images"
+  aws_region: "us-east-1"
+  log_level: "info"

@@ -1,0 +1,107 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: shopsimple-dev
+
+resources:
+  - ../../base
+
+components:
+  - ../../components/cert-manager
+
+labels:
+  - pairs:
+      app.kubernetes.io/environment: dev
+
+replicas:
+  - name: frontend
+    count: 1
+  - name: api
+    count: 1
+  - name: worker
+    count: 1
+
+patches:
+  - patch: |
+      apiVersion: v1
+      kind: ConfigMap
+      metadata:
+        name: shopsimple-config
+      data:
+        s3_bucket: shopsimple-dev-images
+        log_level: debug
+    target:
+      kind: ConfigMap
+      name: shopsimple-config
+  - patch: |
+      apiVersion: apps/v1
+      kind: Deployment
+      metadata:
+        name: frontend
+      spec:
+        template:
+          spec:
+            containers:
+              - name: frontend
+                resources:
+                  requests:
+                    cpu: "50m"
+                    memory: "128Mi"
+                  limits:
+                    cpu: "100m"
+                    memory: "256Mi"
+    target:
+      kind: Deployment
+      name: frontend
+  - patch: |
+      apiVersion: apps/v1
+      kind: Deployment
+      metadata:
+        name: api
+      spec:
+        template:
+          spec:
+            containers:
+              - name: api
+                resources:
+                  requests:
+                    cpu: "100m"
+                    memory: "256Mi"
+                  limits:
+                    cpu: "250m"
+                    memory: "512Mi"
+    target:
+      kind: Deployment
+      name: api
+  - patch: |
+      apiVersion: apps/v1
+      kind: Deployment
+      metadata:
+        name: worker
+      spec:
+        template:
+          spec:
+            containers:
+              - name: worker
+                resources:
+                  requests:
+                    cpu: "50m"
+                    memory: "128Mi"
+                  limits:
+                    cpu: "100m"
+                    memory: "256Mi"
+    target:
+      kind: Deployment
+      name: worker
+  - patch: |
+      apiVersion: cert-manager.io/v1
+      kind: Certificate
+      metadata:
+        name: shopsimple-tls
+      spec:
+        issuerRef:
+          kind: Issuer
+          name: selfsigned-issuer
+    target:
+      kind: Certificate
+      name: shopsimple-tls

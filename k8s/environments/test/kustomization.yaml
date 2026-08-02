@@ -1,0 +1,47 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: shopsimple-test
+
+resources:
+  - ../../base
+
+components:
+  - ../../components/cert-manager
+
+labels:
+  - pairs:
+      app.kubernetes.io/environment: test
+
+replicas:
+  - name: frontend
+    count: 1
+  - name: api
+    count: 2
+  - name: worker
+    count: 1
+
+patches:
+  - patch: |
+      apiVersion: v1
+      kind: ConfigMap
+      metadata:
+        name: shopsimple-config
+      data:
+        s3_bucket: shopsimple-test-images
+        log_level: info
+    target:
+      kind: ConfigMap
+      name: shopsimple-config
+  - patch: |
+      apiVersion: cert-manager.io/v1
+      kind: Certificate
+      metadata:
+        name: shopsimple-tls
+      spec:
+        issuerRef:
+          kind: Issuer
+          name: selfsigned-issuer
+    target:
+      kind: Certificate
+      name: shopsimple-tls

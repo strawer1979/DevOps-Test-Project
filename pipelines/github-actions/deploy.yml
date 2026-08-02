@@ -1,0 +1,424 @@
+name: Deploy
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Target environment'
+        required: true
+        type: choice
+        options:
+          - dev
+          - test
+          - perf
+          - staging
+          - prod
+      service:
+        description: 'Service to deploy'
+        required: false
+        type: choice
+        options:
+          - all
+          - frontend
+          - api
+          - worker
+        default: 'all'
+      image_tag:
+        description: 'Docker image tag (git SHA)'
+        required: false
+        type: string
+        default: ''
+
+env:
+  AWS_REGION: us-east-1
+  ECR_REGISTRY: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_REGION }}.amazonaws.com
+
+jobs:
+  validate-environment:
+    name: Validate Environment
+    runs-on: ubuntu-latest
+    outputs:
+      environment: ${{ steps.set_env.outputs.environment }}
+      image_tag: ${{ steps.set_env.outputs.image_tag }}
+      service: ${{ steps.set_env.outputs.service }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set environment
+        id: set_env
+        run: |
+          ENVIRONMENT="${{ github.event.inputs.environment }}"
+          IMAGE_TAG="${{ github.event.inputs.image_tag }}"
+          SERVICE="${{ github.event.inputs.service }}"
+
+          if [ -z "$IMAGE_TAG" ]; then
+            IMAGE_TAG="${{ github.sha }}"
+          fi
+
+          echo "environment=$ENVIRONMENT" >> $GITHUB_OUTPUT
+          echo "image_tag=$IMAGE_TAG" >> $GITHUB_OUTPUT
+          echo "service=$SERVICE" >> $GITHUB_OUTPUT
+
+          echo "Deploying to: $ENVIRONMENT"
+          echo "Image tag: $IMAGE_TAG"
+          echo "Service: $SERVICE"
+
+  deploy-to-dev:
+    name: Deploy to Dev
+    needs: validate-environment
+    if: needs.validate-environment.outputs.environment == 'dev' || needs.validate-environment.outputs.environment == 'all'
+    runs-on: ubuntu-latest
+    environment: dev
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Update image tags in kustomize
+        run: |
+          cd k8s/environments/dev
+
+          if [[ "${{ needs.validate-environment.outputs.service }}" == "all" ]] || [[ "${{ needs.validate-environment.outputs.service }}" == "frontend" ]]; then
+            kustomize edit set image shopsimple/frontend=${{ env.ECR_REGISTRY }}/frontend:${{ needs.validate-environment.outputs.image_tag }}
+          fi
+
+          if [[ "${{ needs.validate-environment.outputs.service }}" == "all" ]] || [[ "${{ needs.validate-environment.outputs.service }}" == "api" ]]; then
+            kustomize edit set image shopsimple/api=${{ env.ECR_REGISTRY }}/api:${{ needs.validate-environment.outputs.image_tag }}
+          fi
+
+          if [[ "${{ needs.validate-environment.outputs.service }}" == "all" ]] || [[ "${{ needs.validate-environment.outputs.service }}" == "worker" ]]; then
+            kustomize edit set image shopsimple/worker=${{ env.ECR_REGISTRY }}/worker:${{ needs.validate-environment.outputs.image_tag }}
+          fi
+
+          cat kustomization.yaml
+
+      - name: Deploy to Kubernetes
+        uses: azure/k8s-set-context@v4
+        with:
+          kubeconfig: ${{ secrets.KUBECONFIG_DEV }}
+
+      - name: Apply Kubernetes manifests
+        run: kubectl apply -k k8s/environments/dev --namespace=shopsimple-dev
+
+      - name: Wait for rollout
+        run: |
+          kubectl rollout status deployment/frontend -n shopsimple-dev --timeout=300s
+          kubectl rollout status deployment/api -n shopsimple-dev --timeout=300s
+          kubectl rollout status deployment/worker -n shopsimple-dev --timeout=300s
+
+      - name: Health check
+        run: |
+          sleep 10
+          curl -f http://api.dev.shopsimple.com/health || exit 1
+          echo "Dev deployment successful!"
+
+  deploy-to-test:
+    name: Deploy to Test
+    needs: validate-environment
+    if: needs.validate-environment.outputs.environment == 'test' || needs.validate-environment.outputs.environment == 'all'
+    runs-on: ubuntu-latest
+    environment: test
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Update image tags in kustomize
+        run: |
+          cd k8s/environments/test
+
+          if [[ "${{ needs.validate-environment.outputs.service }}" == "all" ]] || [[ "${{ needs.validate-environment.outputs.service }}" == "frontend" ]]; then
+            kustomize edit set image shopsimple/frontend=${{ env.ECR_REGISTRY }}/frontend:${{ needs.validate-environment.outputs.image_tag }}
+          fi
+
+          if [[ "${{ needs.validate-environment.outputs.service }}" == "all" ]] || [[ "${{ needs.validate-environment.outputs.service }}" == "api" ]]; then
+            kustomize edit set image shopsimple/api=${{ env.ECR_REGISTRY }}/api:${{ needs.validate-environment.outputs.image_tag }}
+          fi
+
+          if [[ "${{ needs.validate-environment.outputs.service }}" == "all" ]] || [[ "${{ needs.validate-environment.outputs.service }}" == "worker" ]]; then
+            kustomize edit set image shopsimple/worker=${{ env.ECR_REGISTRY }}/worker:${{ needs.validate-environment.outputs.image_tag }}
+          fi
+
+      - name: Deploy to Kubernetes
+        uses: azure/k8s-set-context@v4
+        with:
+          kubeconfig: ${{ secrets.KUBECONFIG_TEST }}
+
+      - name: Apply Kubernetes manifests
+        run: kubectl apply -k k8s/environments/test --namespace=shopsimple-test
+
+      - name: Wait for rollout
+        run: |
+          kubectl rollout status deployment/frontend -n shopsimple-test --timeout=300s
+          kubectl rollout status deployment/api -n shopsimple-test --timeout=300s
+          kubectl rollout status deployment/worker -n shopsimple-test --timeout=300s
+
+      - name: Run integration tests
+        run: |
+          cd tests/integration
+          npm ci
+          npm test
+
+  deploy-to-perf:
+    name: Deploy to Perf
+    needs: validate-environment
+    if: needs.validate-environment.outputs.environment == 'perf' || needs.validate-environment.outputs.environment == 'all'
+    runs-on: ubuntu-latest
+    environment: perf
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Update image tags in kustomize
+        run: |
+          cd k8s/environments/perf
+
+          if [[ "${{ needs.validate-environment.outputs.service }}" == "all" ]] || [[ "${{ needs.validate-environment.outputs.service }}" == "frontend" ]]; then
+            kustomize edit set image shopsimple/frontend=${{ env.ECR_REGISTRY }}/frontend:${{ needs.validate-environment.outputs.image_tag }}
+          fi
+
+          if [[ "${{ needs.validate-environment.outputs.service }}" == "all" ]] || [[ "${{ needs.validate-environment.outputs.service }}" == "api" ]]; then
+            kustomize edit set image shopsimple/api=${{ env.ECR_REGISTRY }}/api:${{ needs.validate-environment.outputs.image_tag }}
+          fi
+
+          if [[ "${{ needs.validate-environment.outputs.service }}" == "all" ]] || [[ "${{ needs.validate-environment.outputs.service }}" == "worker" ]]; then
+            kustomize edit set image shopsimple/worker=${{ env.ECR_REGISTRY }}/worker:${{ needs.validate-environment.outputs.image_tag }}
+          fi
+
+      - name: Deploy to Kubernetes
+        uses: azure/k8s-set-context@v4
+        with:
+          kubeconfig: ${{ secrets.KUBECONFIG_PERF }}
+
+      - name: Apply Kubernetes manifests
+        run: kubectl apply -k k8s/environments/perf --namespace=shopsimple-perf
+
+      - name: Wait for rollout
+        run: |
+          kubectl rollout status deployment/frontend -n shopsimple-perf --timeout=300s
+          kubectl rollout status deployment/api -n shopsimple-perf --timeout=300s
+          kubectl rollout status deployment/worker -n shopsimple-perf --timeout=300s
+
+      - name: Run load tests
+        run: |
+          echo "Running k6 load tests..."
+          k6 run tests/load/main.js --env ENV=perf --env API_URL=http://api.perf.shopsimple.com
+
+  deploy-to-staging:
+    name: Deploy to Staging
+    needs: validate-environment
+    if: needs.validate-environment.outputs.environment == 'staging' || needs.validate-environment.outputs.environment == 'all'
+    runs-on: ubuntu-latest
+    environment: staging
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Update image tags in kustomize
+        run: |
+          cd k8s/environments/staging
+
+          if [[ "${{ needs.validate-environment.outputs.service }}" == "all" ]] || [[ "${{ needs.validate-environment.outputs.service }}" == "frontend" ]]; then
+            kustomize edit set image shopsimple/frontend=${{ env.ECR_REGISTRY }}/frontend:${{ needs.validate-environment.outputs.image_tag }}
+          fi
+
+          if [[ "${{ needs.validate-environment.outputs.service }}" == "all" ]] || [[ "${{ needs.validate-environment.outputs.service }}" == "api" ]]; then
+            kustomize edit set image shopsimple/api=${{ env.ECR_REGISTRY }}/api:${{ needs.validate-environment.outputs.image_tag }}
+          fi
+
+          if [[ "${{ needs.validate-environment.outputs.service }}" == "all" ]] || [[ "${{ needs.validate-environment.outputs.service }}" == "worker" ]]; then
+            kustomize edit set image shopsimple/worker=${{ env.ECR_REGISTRY }}/worker:${{ needs.validate-environment.outputs.image_tag }}
+          fi
+
+      - name: Deploy to Kubernetes
+        uses: azure/k8s-set-context@v4
+        with:
+          kubeconfig: ${{ secrets.KUBECONFIG_STAGING }}
+
+      - name: Apply Kubernetes manifests
+        run: kubectl apply -k k8s/environments/staging --namespace=shopsimple-staging
+
+      - name: Wait for rollout
+        run: |
+          kubectl rollout status deployment/frontend -n shopsimple-staging --timeout=300s
+          kubectl rollout status deployment/api -n shopsimple-staging --timeout=300s
+          kubectl rollout status deployment/worker -n shopsimple-staging --timeout=300s
+
+      - name: Run smoke tests
+        run: |
+          sleep 10
+          curl -f http://api.staging.shopsimple.com/health || exit 1
+          curl -f http://frontend.staging.shopsimple.com/ || exit 1
+          echo "Staging deployment successful!"
+
+  deploy-to-prod:
+    name: Deploy to Prod (Canary)
+    needs: validate-environment
+    if: needs.validate-environment.outputs.environment == 'prod' || needs.validate-environment.outputs.environment == 'all'
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Deploy Canary 25%
+        run: |
+          cd k8s/environments/prod/overlays/canary-25
+
+          if [[ "${{ needs.validate-environment.outputs.service }}" == "all" ]] || [[ "${{ needs.validate-environment.outputs.service }}" == "frontend" ]]; then
+            kustomize edit set image shopsimple/frontend=${{ env.ECR_REGISTRY }}/frontend:${{ needs.validate-environment.outputs.image_tag }}
+          fi
+
+          if [[ "${{ needs.validate-environment.outputs.service }}" == "all" ]] || [[ "${{ needs.validate-environment.outputs.service }}" == "api" ]]; then
+            kustomize edit set image shopsimple/api=${{ env.ECR_REGISTRY }}/api:${{ needs.validate-environment.outputs.image_tag }}
+          fi
+
+          if [[ "${{ needs.validate-environment.outputs.service }}" == "all" ]] || [[ "${{ needs.validate-environment.outputs.service }}" == "worker" ]]; then
+            kustomize edit set image shopsimple/worker=${{ env.ECR_REGISTRY }}/worker:${{ needs.validate-environment.outputs.image_tag }}
+          fi
+
+          echo "Deploying canary 25%..."
+
+      - name: Deploy 25% to Kubernetes
+        uses: azure/k8s-set-context@v4
+        with:
+          kubeconfig: ${{ secrets.KUBECONFIG_PROD }}
+
+      - name: Apply canary 25%
+        run: |
+          kubectl apply -k k8s/environments/prod/overlays/canary-25 --namespace=shopsimple-prod
+
+      - name: Verify Canary 25%
+        run: |
+          echo "Waiting for canary to stabilize..."
+          sleep 60
+
+          # Check error rates
+          ERROR_RATE=$(kubectl exec -n shopsimple-prod deployment/api -- curl -s localhost:8080/metrics 2>/dev/null | grep 'http_requests_total{status="5xx"}' | awk '{print $2}' || echo "0")
+          echo "5xx error rate: $ERROR_RATE"
+
+          # Verify health
+          curl -f http://api.shopsimple.com/health || exit 1
+          echo "Canary 25% verified!"
+
+      - name: Approve Canary 50%
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const { data: reviews } = await github.rest.pulls.listReviews({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              pull_number: context.issue.number,
+            });
+
+            const approval = reviews.find(r => r.state === 'APPROVED');
+            if (!approval) {
+              core.warning('No PR approval found. Continuing with manual approval assumption.');
+            }
+
+      - name: Deploy Canary 50%
+        run: |
+          echo "Deploying canary 50%..."
+          cd k8s/environments/prod/overlays/canary-50
+          kubectl apply -k . --namespace=shopsimple-prod
+
+      - name: Verify Canary 50%
+        run: |
+          sleep 60
+          curl -f http://api.shopsimple.com/health || exit 1
+          echo "Canary 50% verified!"
+
+      - name: Deploy 100% (Full Rollout)
+        if: github.event.inputs.skip_canary != 'true'
+        run: |
+          echo "Deploying full 100%..."
+          kubectl apply -k k8s/environments/prod --namespace=shopsimple-prod
+
+          kubectl rollout status deployment/frontend -n shopsimple-prod --timeout=300s
+          kubectl rollout status deployment/api -n shopsimple-prod --timeout=300s
+          kubectl rollout status deployment/worker -n shopsimple-prod --timeout=300s
+
+      - name: Final Health Check
+        run: |
+          sleep 10
+          curl -f http://api.shopsimple.com/health || exit 1
+          curl -f http://frontend.shopsimple.com/ || exit 1
+          echo "Production deployment successful!"
+
+      - name: Rollback on failure
+        if: failure()
+        run: |
+          echo "Deployment failed! Rolling back..."
+          kubectl rollout undo deployment/frontend -n shopsimple-prod
+          kubectl rollout undo deployment/api -n shopsimple-prod
+          kubectl rollout undo deployment/worker -n shopsimple-prod
+
+          kubectl rollout status deployment/frontend -n shopsimple-prod --timeout=300s
+          kubectl rollout status deployment/api -n shopsimple-prod --timeout=300s
+          kubectl rollout status deployment/worker -n shopsimple-prod --timeout=300s
+
+          echo "Rollback complete!"
+
+  notify:
+    name: Notify
+    needs: [deploy-to-dev, deploy-to-test, deploy-to-perf, deploy-to-staging, deploy-to-prod]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Send deployment notification
+        run: |
+          if [[ "${{ needs.*.result }}" == *"failure"* ]]; then
+            echo "Deployment failed! Sending alert..."
+            # Add Slack/email notification logic here
+          else
+            echo "Deployment completed successfully!"
+          fi

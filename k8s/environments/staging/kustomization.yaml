@@ -1,0 +1,110 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: shopsimple-staging
+
+resources:
+  - ../../base
+  - pdb-api.yaml
+
+components:
+  - ../../components/cert-manager
+  - ../../components/hpa
+  - ../../components/monitoring
+
+labels:
+  - pairs:
+      app.kubernetes.io/environment: staging
+
+replicas:
+  - name: frontend
+    count: 2
+  - name: api
+    count: 3
+  - name: worker
+    count: 2
+
+patches:
+  - patch: |
+      apiVersion: v1
+      kind: ConfigMap
+      metadata:
+        name: shopsimple-config
+      data:
+        s3_bucket: shopsimple-staging-images
+        log_level: info
+    target:
+      kind: ConfigMap
+      name: shopsimple-config
+  - patch: |
+      apiVersion: apps/v1
+      kind: Deployment
+      metadata:
+        name: frontend
+      spec:
+        template:
+          spec:
+            containers:
+              - name: frontend
+                resources:
+                  requests:
+                    cpu: "100m"
+                    memory: "256Mi"
+                  limits:
+                    cpu: "250m"
+                    memory: "512Mi"
+    target:
+      kind: Deployment
+      name: frontend
+  - patch: |
+      apiVersion: apps/v1
+      kind: Deployment
+      metadata:
+        name: api
+      spec:
+        template:
+          spec:
+            containers:
+              - name: api
+                resources:
+                  requests:
+                    cpu: "200m"
+                    memory: "512Mi"
+                  limits:
+                    cpu: "500m"
+                    memory: "1Gi"
+    target:
+      kind: Deployment
+      name: api
+  - patch: |
+      apiVersion: apps/v1
+      kind: Deployment
+      metadata:
+        name: worker
+      spec:
+        template:
+          spec:
+            containers:
+              - name: worker
+                resources:
+                  requests:
+                    cpu: "200m"
+                    memory: "512Mi"
+                  limits:
+                    cpu: "500m"
+                    memory: "1Gi"
+    target:
+      kind: Deployment
+      name: worker
+  - patch: |
+      apiVersion: cert-manager.io/v1
+      kind: Certificate
+      metadata:
+        name: shopsimple-tls
+      spec:
+        issuerRef:
+          kind: ClusterIssuer
+          name: letsencrypt-staging
+    target:
+      kind: Certificate
+      name: shopsimple-tls

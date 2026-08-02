@@ -1,0 +1,68 @@
+graph TB
+    subgraph Internet["Internet"]
+        User[Users]
+    end
+
+    subgraph Route53["Route 53"]
+        DNS[DNS Records]
+    end
+
+    subgraph CloudFront["CloudFront (CDN)"]
+        CDN[Distribution]
+    end
+
+    subgraph AWS["AWS (us-east-1)"]
+        subgraph VPC["VPC 10.0.0.0/16"]
+            subgraph Public["Public Subnets"]
+                ALB[Application Load Balancer]
+                NAT[NAT Gateway]
+            end
+
+            subgraph Private["Private Subnets"]
+                subgraph EKS["EKS Cluster"]
+                    Node1[Node t3.small]
+                    Node2[Node t3.small]
+                    Node3[Node t3.small]
+                end
+            end
+
+            subgraph Data["Database Subnets"]
+                RDS[(RDS PostgreSQL)]
+                ElastiCache[(ElastiCache Redis)]
+            end
+
+            subgraph Storage["S3"]
+                Bucket[Product Images Bucket]
+            end
+
+            subgraph Registry["ECR"]
+                ECR[Container Registry]
+            end
+        end
+    end
+
+    User -->|HTTPS| DNS
+    DNS --> CDN
+    CDN --> ALB
+    ALB --> Node1
+    ALB --> Node2
+    ALB --> Node3
+    Node1 --> RDS
+    Node1 --> ElastiCache
+    Node1 --> Bucket
+    Node2 --> RDS
+    Node2 --> ElastiCache
+    Node2 --> Bucket
+    Node3 --> RDS
+    Node3 --> ElastiCache
+    Node3 --> Bucket
+    Node1 --> ECR
+    Node2 --> ECR
+    Node3 --> ECR
+
+    style Internet fill:#e1f5fe
+    style AWS fill:#fff3e0
+    style VPC fill:#e8f5e9
+    style Public fill:#fff9c4
+    style Private fill:#f3e5f5
+    style Data fill:#fce4ec

@@ -1,0 +1,124 @@
+graph TB
+    subgraph Internet["Internet"]
+        User[Users]
+    end
+
+    subgraph DNS["Global DNS"]
+        Route53["Route 53 (Failover + Geo)"]
+        AliDNS["Alibaba Cloud DNS (Weight + Line)"]
+    end
+
+    %% =========================================================================
+    %% AWS Multi-Region
+    %% =========================================================================
+    subgraph AWS["AWS Multi-Region"]
+        subgraph AWS_Primary["Primary: us-east-1"]
+            subgraph VPC_AWS1["VPC 10.0.0.0/16"]
+                ALB1[ALB]
+                NAT1[NAT GW x3]
+                subgraph EKS1["EKS Cluster"]
+                    N1a[Node t3.large]
+                    N1b[Node t3.large]
+                    N1c[Node t3.large]
+                end
+                subgraph Data1["Database Subnets (Multi-AZ)"]
+                    RDS1[(RDS PostgreSQL Multi-AZ)]
+                    EC1[(ElastiCache Redis x3)]
+                end
+            end
+            ECR1[ECR]
+            S31[S3]
+        end
+
+        subgraph AWS_Secondary["Secondary: ap-southeast-1 (Passive)"]
+            subgraph VPC_AWS2["VPC 10.1.0.0/16"]
+                ALB2[ALB]
+                subgraph EKS2["EKS Cluster (Warm)"]
+                    N2a[Node t3.large]
+                    N2b[Node t3.large]
+                end
+            end
+            ECR2[ECR]
+            S32["S3 (Replica)"]
+        end
+    end
+
+    %% =========================================================================
+    %% Alicloud Multi-Region
+    %% =========================================================================
+    subgraph Alicloud["Alicloud Multi-Region"]
+        subgraph Ali_Primary["Primary: cn-hangzhou"]
+            subgraph VPC_Ali1["VPC 172.16.0.0/12"]
+                SLB1[SLB]
+                NAT_Ali1[NAT GW x3]
+                subgraph ACK1["ACK Cluster (Pro)"]
+                    AN1a[Node ecs.g6.2xlarge]
+                    AN1b[Node ecs.g6.2xlarge]
+                    AN1c[Node ecs.g6.2xlarge]
+                end
+                subgraph Data_Ali1["Database VSwitches (HA)"]
+                    ARDS1[(ApsaraDB RDS HA)]
+                    AR1[(KVStore Redis HA)]
+                end
+            end
+            ACR1[ACR]
+            OSS1[OSS]
+        end
+
+        subgraph Ali_Secondary["Secondary: ap-southeast-1 (Passive)"]
+            subgraph VPC_Ali2["VPC 172.17.0.0/12"]
+                SLB2[SLB]
+                subgraph ACK2["ACK Cluster (Warm)"]
+                    AN2a[Node ecs.g6.xlarge]
+                    AN2b[Node ecs.g6.xlarge]
+                end
+            end
+            ACR2[ACR]
+            OSS2["OSS (Replica)"]
+        end
+    end
+
+    %% =========================================================================
+    %% Traffic flow
+    %% =========================================================================
+    User -->|"Geo/Failover"| Route53
+    User -->|"Weight/Line"| AliDNS
+
+    Route53 -->|"Primary (Active)"| ALB1
+    Route53 -.->|"Failover"| ALB2
+
+    AliDNS -->|"Primary (Active)"| SLB1
+    AliDNS -.->|"Failover"| SLB2
+
+    ALB1 --> N1a & N1b & N1c
+    ALB2 -.-> N2a & N2b
+    SLB1 --> AN1a & AN1b & AN1c
+    SLB2 -.-> AN2a & AN2b
+
+    N1a --> RDS1 & EC1 & S31 & ECR1
+    N2a -.-> S32 & ECR2
+    AN1a --> ARDS1 & AR1 & OSS1 & ACR1
+    AN2a -.-> OSS2 & ACR2
+
+    %% Cross-region replication
+    S31 ==>|"Cross-Region Replication"| S32
+    OSS1 ==>|"Cross-Region Replication"| OSS2
+    ECR1 ==>|"Image Replication"| ECR2
+    ACR1 ==>|"Image Replication"| ACR2
+
+    %% =========================================================================
+    %% Styling
+    %% =========================================================================
+    style Internet fill:#e1f5fe
+    style AWS fill:#fff3e0
+    style Alicloud fill:#fce4ec
+    style AWS_Primary fill:#e8f5e9
+    style AWS_Secondary fill:#fff9c4
+    style Ali_Primary fill:#e8f5e9
+    style Ali_Secondary fill:#fff9c4
+    style EKS1 fill:#f3e5f5
+    style EKS2 fill:#f3e5f5
+    style ACK1 fill:#f3e5f5
+    style ACK2 fill:#f3e5f5
+    style Data1 fill:#ffe0b2
+    style Data_Ali1 fill:#ffe0b2

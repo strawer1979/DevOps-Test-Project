@@ -1,0 +1,47 @@
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: api-sm
+  namespace: shopsimple
+  labels:
+    app.kubernetes.io/name: api
+    app.kubernetes.io/part-of: shopsimple
+    app.kubernetes.io/component: api
+    release: prometheus
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: api
+      app.kubernetes.io/component: api
+  endpoints:
+    - port: http
+      path: /metrics
+      interval: 30s
+      scheme: http
+  namespaceSelector:
+    matchNames:
+      - shopsimple
+---
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: worker-sm
+  namespace: shopsimple
+  labels:
+    app.kubernetes.io/name: worker
+    app.kubernetes.io/part-of: shopsimple
+    app.kubernetes.io/component: worker
+    release: prometheus
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: worker
+      app.kubernetes.io/component: worker
+  endpoints:
+    - port: http
+      path: /metrics
+      interval: 30s
+      scheme: http
+  namespaceSelector:
+    matchNames:
+      - shopsimple

@@ -1,0 +1,278 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+      - develop
+  pull_request:
+    branches:
+      - main
+      - develop
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+
+jobs:
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: services/**/package-lock.json
+
+      - name: Install dependencies
+        run: |
+          npm ci --prefix services/frontend
+          npm ci --prefix services/api
+          npm ci --prefix services/worker
+
+      - name: Lint Frontend
+        run: npm run lint --prefix services/frontend
+        working-directory: services/frontend
+
+      - name: Check Frontend formatting
+        run: npm run format:check --prefix services/frontend
+        working-directory: services/frontend
+
+      - name: Lint API
+        run: npm run lint --prefix services/api
+        working-directory: services/api
+
+      - name: Check API formatting
+        run: npm run format:check --prefix services/api
+        working-directory: services/api
+
+      - name: Lint Worker
+        run: npm run lint --prefix services/worker
+        working-directory: services/worker
+
+      - name: Check Worker formatting
+        run: npm run format:check --prefix services/worker
+        working-directory: services/worker
+
+      - name: Validate Kubernetes manifests
+        uses: datreeio/action-yaml-validator@v1
+        with:
+          path: k8s/
+          rule: helm2/kustomize
+
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: services/**/package-lock.json
+
+      - name: Install dependencies
+        run: |
+          npm ci --prefix services/frontend
+          npm ci --prefix services/api
+          npm ci --prefix services/worker
+
+      - name: Run Frontend Tests
+        run: npm run test --prefix services/frontend -- --coverage
+        working-directory: services/frontend
+        env:
+          CI: true
+          NODE_ENV: test
+
+      - name: Run API Tests
+        run: npm run test --prefix services/api -- --coverage
+        working-directory: services/api
+        env:
+          CI: true
+          NODE_ENV: test
+
+      - name: Run Worker Tests
+        run: npm run test --prefix services/worker -- --coverage
+        working-directory: services/worker
+        env:
+          CI: true
+          NODE_ENV: test
+
+      - name: Upload coverage reports
+        uses: codecov/codecov-action@v4
+        with:
+          files: ./services/frontend/coverage/coverage-final.json,./services/api/coverage/coverage-final.json,./services/worker/coverage/coverage-final.json
+          fail_ci_if_error: false
+
+  build:
+    name: Build
+    runs-on: ubuntu-latest
+    needs: [lint, test]
+    strategy:
+      matrix:
+        service: [frontend, api, worker]
+    outputs:
+      frontend_image: ${{ steps.build.outputs.frontend_image }}
+      api_image: ${{ steps.build.outputs.api_image }}
+      worker_image: ${{ steps.build.outputs.worker_image }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to Container Registry
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}/${{ matrix.service }}
+          tags: |
+            type=ref,event=branch
+            type=sha,prefix=
+            type=raw,value=latest,enable={{is_default_branch}}
+
+      - name: Build and push ${{ matrix.service }}
+        id: build
+        uses: docker/build-push-action@v5
+        with:
+          context: services/${{ matrix.service }}
+          platforms: linux/amd64,linux/arm64
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha,scope=${{ matrix.service }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.service }}
+          build-args: |
+            NODE_VERSION=20
+            GIT_SHA=${{ github.sha }}
+            BUILD_DATE=${{ fromJSON('{{"year":"2024","month":"08","day":"01","time":"00:00:00"}}').year }}-${{ fromJSON('{{"year":"2024","month":"08","day":"01","time":"00:00:00"}}').month }}-${{ fromJSON('{{"year":"2024","month":"08","day":"01","time":"00:00:00"}}').day }}
+
+      - name: Set output for ${{ matrix.service }}
+        if: matrix.service == 'frontend'
+        run: echo "frontend_image=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}/frontend:${{ github.sha }}" >> $GITHUB_OUTPUT
+
+      - name: Set output for ${{ matrix.service }}
+        if: matrix.service == 'api'
+        run: echo "api_image=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}/api:${{ github.sha }}" >> $GITHUB_OUTPUT
+
+      - name: Set output for ${{ matrix.service }}
+        if: matrix.service == 'worker'
+        run: echo "worker_image=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}/worker:${{ github.sha }}" >> $GITHUB_OUTPUT
+
+  security-scan:
+    name: Security Scan
+    runs-on: ubuntu-latest
+    needs: [build]
+    strategy:
+      matrix:
+        service: [frontend, api, worker]
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Download build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ matrix.service }}-image
+          path: /tmp
+
+      - name: Run Trivy vulnerability scanner
+        uses: aquasecurity/trivy-action@master
+        with:
+          scan-type: 'fs'
+          scan-ref: services/${{ matrix.service }}
+          severity: 'CRITICAL,HIGH'
+          exit-code: '1'
+          ignore-unfixed: true
+          format: 'sarif'
+          output: 'trivy-results.sarif'
+
+      - name: Upload Trivy results to GitHub Security
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: 'trivy-results.sarif'
+
+      - name: Cache Trivy DB
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/trivy
+          key: trivy-db-${{ github.run_id }}
+          restore-keys: |
+            trivy-db-
+
+  build-and-push-ecr:
+    name: Build and Push to ECR
+    runs-on: ubuntu-latest
+    needs: [security-scan]
+    if: github.event_name != 'pull_request'
+    strategy:
+      matrix:
+        service: [frontend, api, worker]
+    outputs:
+      frontend_tag: ${{ steps.ecr.outputs.frontend_tag }}
+      api_tag: ${{ steps.ecr.outputs.api_tag }}
+      worker_tag: ${{ steps.ecr.outputs.worker_tag }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build and push to ECR
+        uses: docker/build-push-action@v5
+        with:
+          context: services/${{ matrix.service }}
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: |
+            ${{ steps.login-ecr.outputs.registry }}/${{ matrix.service }}:${{ github.sha }}
+            ${{ steps.login-ecr.outputs.registry }}/${{ matrix.service }}:latest
+          cache-from: type=gha,scope=${{ matrix.service }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.service }}
+
+      - name: Set ECR output
+        if: matrix.service == 'frontend'
+        run: echo "frontend_tag=${{ steps.login-ecr.outputs.registry }}/frontend:${{ github.sha }}" >> $GITHUB_OUTPUT
+
+      - name: Set ECR output
+        if: matrix.service == 'api'
+        run: echo "api_tag=${{ steps.login-ecr.outputs.registry }}/api:${{ github.sha }}" >> $GITHUB_OUTPUT
+
+      - name: Set ECR output
+        if: matrix.service == 'worker'
+        run: echo "worker_tag=${{ steps.login-ecr.outputs.registry }}/worker:${{ github.sha }}" >> $GITHUB_OUTPUT

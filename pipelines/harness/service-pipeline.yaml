@@ -1,0 +1,741 @@
+pipeline:
+  name: ShopSimple Service Pipeline
+  identifier: shopsimple_service_pipeline
+  projectIdentifier: shopsimple
+  orgIdentifier: default
+  tags:
+    - service
+    - kubernetes
+    - docker
+  description: CI/CD pipeline for ShopSimple frontend, API, and worker services
+
+  variables:
+    - name: environment
+      type: String
+      required: true
+      default: dev
+      description: Target environment (dev/test/perf/staging/prod)
+    - name: image_tag
+      type: String
+      required: true
+      default: <+GITHUB_SHA>
+      description: Docker image tag (git SHA)
+    - name: service
+      type: String
+      required: true
+      default: all
+      description: Service to build (all/frontend/api/worker)
+    - name: ecr_repo_base
+      type: String
+      required: true
+      default: shopsimple
+      description: ECR repository base name
+    - name: aws_region
+      type: String
+      required: true
+      default: us-east-1
+      description: AWS region
+
+  stages:
+    # ============================================
+    # Stage 1: Build
+    # ============================================
+    - stage:
+        name: Build
+        identifier: build
+        description: Build Docker images for all services
+        type: CI
+        spec:
+          platform:
+            os: Linux
+            arch: Amd64
+          runtime:
+            type: Cloud
+          execution:
+            steps:
+              - step:
+                  name: Setup Build Environment
+                  identifier: setup_env
+                  type: Command
+                  timeout: 5m
+                  spec:
+                    shell: Bash
+                    command: |
+                      echo "========================================"
+                      echo "Setting up build environment"
+                      echo "========================================"
+                      echo "Service: <+variables.service>"
+                      echo "Image Tag: <+variables.image_tag>"
+                      echo "========================================"
+                      # Configure Docker buildx
+                      docker buildx create --name shopsimple-builder || true
+                      docker buildx use shopsimple-builder
+
+              - step:
+                  name: Build Frontend
+                  identifier: build_frontend
+                  type: Command
+                  timeout: 15m
+                  spec:
+                    shell: Bash
+                    command: |
+                      if [[ "<+variables.service>" == "all" ]] || [[ "<+variables.service>" == "frontend" ]]; then
+                        echo "Building frontend..."
+                        cd services/frontend
+                        docker buildx build \
+                          --platform linux/amd64,linux/arm64 \
+                          -t <+variables.ecr_repo_base>/frontend:<+variables.image_tag> \
+                          -t <+variables.ecr_repo_base>/frontend:latest \
+                          --push .
+                      else
+                        echo "Skipping frontend build"
+                      fi
+                    envVariables:
+                      AWS_REGION: <+variables.aws_region>
+              - step:
+                  name: Build API
+                  identifier: build_api
+                  type: Command
+                  timeout: 15m
+                  spec:
+                    shell: Bash
+                    command: |
+                      if [[ "<+variables.service>" == "all" ]] || [[ "<+variables.service>" == "api" ]]; then
+                        echo "Building API..."
+                        cd services/api
+                        docker buildx build \
+                          --platform linux/amd64,linux/arm64 \
+                          -t <+variables.ecr_repo_base>/api:<+variables.image_tag> \
+                          -t <+variables.ecr_repo_base>/api:latest \
+                          --push .
+                      else
+                        echo "Skipping API build"
+                      fi
+                    envVariables:
+                      AWS_REGION: <+variables.aws_region>
+
+              - step:
+                  name: Build Worker
+                  identifier: build_worker
+                  type: Command
+                  timeout: 15m
+                  spec:
+                    shell: Bash
+                    command: |
+                      if [[ "<+variables.service>" == "all" ]] || [[ "<+variables.service>" == "worker" ]]; then
+                        echo "Building worker..."
+                        cd services/worker
+                        docker buildx build \
+                          --platform linux/amd64,linux/arm64 \
+                          -t <+variables.ecr_repo_base>/worker:<+variables.image_tag> \
+                          -t <+variables.ecr_repo_base>/worker:latest \
+                          --push .
+                      else
+                        echo "Skipping worker build"
+                      fi
+                    envVariables:
+                      AWS_REGION: <+variables.aws_region>
+
+              - step:
+                  name: Save Build Metadata
+                  identifier: save_metadata
+                  type: ArtifactCollector
+                  spec:
+                    artifacts:
+                      - name: build-metadata
+                        type: Generic
+                        identifier: build_metadata
+                        spec:
+                          type: s3
+                          location: s3://<+variables.ecr_repo_base>-builds/<+variables.image_tag>/metadata.json
+
+    # ============================================
+    # Stage 2: Test
+    # ============================================
+    - stage:
+        name: Test
+        identifier: test
+        description: Run unit tests and linting
+        type: CI
+        spec:
+          platform:
+            os: Linux
+          runtime:
+            type: Cloud
+          execution:
+            steps:
+              - step:
+                  name: Install Dependencies
+                  identifier: install_deps
+                  type: Command
+                  timeout: 10m
+                  spec:
+                    shell: Bash
+                    command: |
+                      cd services
+                      npm ci --prefix frontend
+                      npm ci --prefix api
+                      npm ci --prefix worker
+
+              - step:
+                  name: Frontend Tests
+                  identifier: frontend_tests
+                  type: Command
+                  timeout: 15m
+                  spec:
+                    shell: Bash
+                    command: |
+                      if [[ "<+variables.service>" == "all" ]] || [[ "<+variables.service>" == "frontend" ]]; then
+                        cd services/frontend
+                        npm run test --if-present
+                        npm run lint
+                      fi
+              - step:
+                  name: API Tests
+                  identifier: api_tests
+                  type: Command
+                  timeout: 15m
+                  spec:
+                    shell: Bash
+                    command: |
+                      if [[ "<+variables.service>" == "all" ]] || [[ "<+variables.service>" == "api" ]]; then
+                        cd services/api
+                        npm run test --if-present
+                        npm run lint
+                      fi
+              - step:
+                  name: Worker Tests
+                  identifier: worker_tests
+                  type: Command
+                  timeout: 15m
+                  spec:
+                    shell: Bash
+                    command: |
+                      if [[ "<+variables.service>" == "all" ]] || [[ "<+variables.service>" == "worker" ]]; then
+                        cd services/worker
+                        npm run test --if-present
+                        npm run lint
+                      fi
+
+    # ============================================
+    # Stage 3: Security Scan
+    # ============================================
+    - stage:
+        name: Security Scan
+        identifier: security_scan
+        description: Scan Docker images for vulnerabilities
+        type: CI
+        spec:
+          platform:
+            os: Linux
+          runtime:
+            type: Cloud
+          execution:
+            steps:
+              - step:
+                  name: Install Trivy
+                  identifier: install_trivy
+                  type: Command
+                  timeout: 5m
+                  spec:
+                    shell: Bash
+                    command: |
+                      curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh | sh -s -- -b /usr/local/bin
+
+              - step:
+                  name: Scan Frontend Image
+                  identifier: scan_frontend
+                  type: Command
+                  timeout: 10m
+                  spec:
+                    shell: Bash
+                    command: |
+                      if [[ "<+variables.service>" == "all" ]] || [[ "<+variables.service>" == "frontend" ]]; then
+                        trivy image \
+                          --severity CRITICAL,HIGH \
+                          --exit-code 1 \
+                          --ignore-unfixed \
+                          <+variables.ecr_repo_base>/frontend:<+variables.image_tag>
+                      fi
+              - step:
+                  name: Scan API Image
+                  identifier: scan_api
+                  type: Command
+                  timeout: 10m
+                  spec:
+                    shell: Bash
+                    command: |
+                      if [[ "<+variables.service>" == "all" ]] || [[ "<+variables.service>" == "api" ]]; then
+                        trivy image \
+                          --severity CRITICAL,HIGH \
+                          --exit-code 1 \
+                          --ignore-unfixed \
+                          <+variables.ecr_repo_base>/api:<+variables.image_tag>
+                      fi
+              - step:
+                  name: Scan Worker Image
+                  identifier: scan_worker
+                  type: Command
+                  timeout: 10m
+                  spec:
+                    shell: Bash
+                    command: |
+                      if [[ "<+variables.service>" == "all" ]] || [[ "<+variables.service>" == "worker" ]]; then
+                        trivy image \
+                          --severity CRITICAL,HIGH \
+                          --exit-code 1 \
+                          --ignore-unfixed \
+                          <+variables.ecr_repo_base>/worker:<+variables.image_tag>
+                      fi
+
+    # ============================================
+    # Stage 4: Push to ECR
+    # ============================================
+    - stage:
+        name: Push
+        identifier: push
+        description: Push images to environment-specific ECR
+        type: CI
+        spec:
+          platform:
+            os: Linux
+          runtime:
+            type: Cloud
+          execution:
+            steps:
+              - step:
+                  name: Login to ECR
+                  identifier: ecr_login
+                  type: Command
+                  timeout: 5m
+                  spec:
+                    shell: Bash
+                    command: |
+                      aws ecr get-login-password --region <+variables.aws_region> | \
+                        docker login --username AWS --password-stdin \
+                        <+variables.ecr_repo_base>.dkr.ecr.<+variables.aws_region>.amazonaws.com
+              - step:
+                  name: Tag for Environment
+                  identifier: tag_images
+                  type: Command
+                  timeout: 10m
+                  spec:
+                    shell: Bash
+                    command: |
+                      ECR_REGISTRY="<+variables.ecr_repo_base>.dkr.ecr.<+variables.aws_region>.amazonaws.com"
+
+                      if [[ "<+variables.service>" == "all" ]] || [[ "<+variables.service>" == "frontend" ]]; then
+                        docker tag <+variables.ecr_repo_base>/frontend:<+variables.image_tag> \
+                          $ECR_REGISTRY/frontend:<+variables.image_tag>
+                        docker push $ECR_REGISTRY/frontend:<+variables.image_tag>
+                      fi
+
+                      if [[ "<+variables.service>" == "all" ]] || [[ "<+variables.service>" == "api" ]]; then
+                        docker tag <+variables.ecr_repo_base>/api:<+variables.image_tag> \
+                          $ECR_REGISTRY/api:<+variables.image_tag>
+                        docker push $ECR_REGISTRY/api:<+variables.image_tag>
+                      fi
+
+                      if [[ "<+variables.service>" == "all" ]] || [[ "<+variables.service>" == "worker" ]]; then
+                        docker tag <+variables.ecr_repo_base>/worker:<+variables.image_tag> \
+                          $ECR_REGISTRY/worker:<+variables.image_tag>
+                        docker push $ECR_REGISTRY/worker:<+variables.image_tag>
+                      fi
+
+    # ============================================
+    # Stage 5: Deploy to Dev
+    # ============================================
+    - stage:
+        name: Deploy to Dev
+        identifier: deploy_dev
+        description: Deploy to development environment
+        type: Deployment
+        spec:
+          deploymentType: Kubernetes
+          kubernetes:
+            namespace: shopsimple-dev
+          execution:
+            steps:
+              - step:
+                  name: Update Image Tag
+                  identifier: update_tag_dev
+                  type: Command
+                  timeout: 2m
+                  spec:
+                    shell: Bash
+                    command: |
+                      # Update kustomization overlay with new image tag
+                      cd k8s/environments/dev
+                      kustomize edit set image shopsimple/frontend=<+variables.ecr_repo_base>.dkr.ecr.<+variables.aws_region>.amazonaws.com/frontend:<+variables.image_tag>
+                      kustomize edit set image shopsimple/api=<+variables.ecr_repo_base>.dkr.ecr.<+variables.aws_region>.amazonaws.com/api:<+variables.image_tag>
+                      kustomize edit set image shopsimple/worker=<+variables.ecr_repo_base>.dkr.ecr.<+variables.aws_region>.amazonaws.com/worker:<+variables.image_tag>
+                      cat kustomization.yaml
+              - step:
+                  name: Deploy to Dev
+                  identifier: kubectl_apply_dev
+                  type: K8sApply
+                  timeout: 10m
+                  spec:
+                    flags: "-k k8s/environments/dev"
+                    prune: true
+                    applyTimeout: 10m
+              - step:
+                  name: Wait for Rollout
+                  identifier: wait_rollout_dev
+                  type: Command
+                  timeout: 5m
+                  spec:
+                    shell: Bash
+                    command: |
+                      kubectl rollout status deployment/frontend -n shopsimple-dev --timeout=300s
+                      kubectl rollout status deployment/api -n shopsimple-dev --timeout=300s
+                      kubectl rollout status deployment/worker -n shopsimple-dev --timeout=300s
+              - step:
+                  name: Health Check Dev
+                  identifier: health_check_dev
+                  type: Command
+                  timeout: 5m
+                  spec:
+                    shell: Bash
+                    command: |
+                      echo "Checking dev endpoints..."
+                      curl -f http://api.dev.shopsimple.com/health || exit 1
+        when:
+          stageConditionType: CONDITION
+          condition: <+variables.environment> == "dev" || <+variables.environment> == "all"
+
+    # ============================================
+    # Stage 6: Deploy to Test
+    # ============================================
+    - stage:
+        name: Deploy to Test
+        identifier: deploy_test
+        description: Deploy to test environment
+        type: Deployment
+        spec:
+          deploymentType: Kubernetes
+          kubernetes:
+            namespace: shopsimple-test
+          execution:
+            steps:
+              - step:
+                  name: Update Image Tag
+                  identifier: update_tag_test
+                  type: Command
+                  timeout: 2m
+                  spec:
+                    shell: Bash
+                    command: |
+                      cd k8s/environments/test
+                      kustomize edit set image shopsimple/frontend=<+variables.ecr_repo_base>.dkr.ecr.<+variables.aws_region>.amazonaws.com/frontend:<+variables.image_tag>
+                      kustomize edit set image shopsimple/api=<+variables.ecr_repo_base>.dkr.ecr.<+variables.aws_region>.amazonaws.com/api:<+variables.image_tag>
+                      kustomize edit set image shopsimple/worker=<+variables.ecr_repo_base>.dkr.ecr.<+variables.aws_region>.amazonaws.com/worker:<+variables.image_tag>
+              - step:
+                  name: Deploy to Test
+                  identifier: kubectl_apply_test
+                  type: K8sApply
+                  timeout: 10m
+                  spec:
+                    flags: "-k k8s/environments/test"
+                    prune: true
+                    applyTimeout: 10m
+              - step:
+                  name: Run Integration Tests
+                  identifier: integration_tests
+                  type: Command
+                  timeout: 15m
+                  spec:
+                    shell: Bash
+                    command: |
+                      echo "Running integration tests..."
+                      # Run test suite against test environment
+                      cd tests/integration
+                      npm test
+        when:
+          stageConditionType: CONDITION
+          condition: <+variables.environment> == "test" || <+variables.environment> == "all"
+
+    # ============================================
+    # Stage 7: Deploy to Perf
+    # ============================================
+    - stage:
+        name: Deploy to Perf
+        identifier: deploy_perf
+        description: Deploy to performance testing environment
+        type: Deployment
+        spec:
+          deploymentType: Kubernetes
+          kubernetes:
+            namespace: shopsimple-perf
+          execution:
+            steps:
+              - step:
+                  name: Update Image Tag
+                  identifier: update_tag_perf
+                  type: Command
+                  timeout: 2m
+                  spec:
+                    shell: Bash
+                    command: |
+                      cd k8s/environments/perf
+                      kustomize edit set image shopsimple/frontend=<+variables.ecr_repo_base>.dkr.ecr.<+variables.aws_region>.amazonaws.com/frontend:<+variables.image_tag>
+                      kustomize edit set image shopsimple/api=<+variables.ecr_repo_base>.dkr.ecr.<+variables.aws_region>.amazonaws.com/api:<+variables.image_tag>
+                      kustomize edit set image shopsimple/worker=<+variables.ecr_repo_base>.dkr.ecr.<+variables.aws_region>.amazonaws.com/worker:<+variables.image_tag>
+              - step:
+                  name: Deploy to Perf
+                  identifier: kubectl_apply_perf
+                  type: K8sApply
+                  timeout: 10m
+                  spec:
+                    flags: "-k k8s/environments/perf"
+                    prune: true
+                    applyTimeout: 10m
+              - step:
+                  name: Run Load Tests
+                  identifier: load_tests
+                  type: Command
+                  timeout: 30m
+                  spec:
+                    shell: Bash
+                    command: |
+                      echo "Running load tests..."
+                      # Run k6 or similar load testing tool
+                      k6 run tests/load/main.js --env ENV=perf
+        when:
+          stageConditionType: CONDITION
+          condition: <+variables.environment> == "perf" || <+variables.environment> == "all"
+
+    # ============================================
+    # Stage 8: Deploy to Staging (with approval)
+    # ============================================
+    - stage:
+        name: Deploy to Staging
+        identifier: deploy_staging
+        description: Deploy to staging environment with approval
+        type: Deployment
+        spec:
+          deploymentType: Kubernetes
+          kubernetes:
+            namespace: shopsimple-staging
+          execution:
+            steps:
+              - step:
+                  name: Manual Approval
+                  identifier: staging_approval
+                  type: HarnessApproval
+                  timeout: 24h
+                  spec:
+                    approvalMessage: "Approve deployment to staging environment"
+                    approvers:
+                      userGroups:
+                        - release-managers
+                    includePipelineExecutionHistory: true
+
+              - step:
+                  name: Update Image Tag
+                  identifier: update_tag_staging
+                  type: Command
+                  timeout: 2m
+                  spec:
+                    shell: Bash
+                    command: |
+                      cd k8s/environments/staging
+                      kustomize edit set image shopsimple/frontend=<+variables.ecr_repo_base>.dkr.ecr.<+variables.aws_region>.amazonaws.com/frontend:<+variables.image_tag>
+                      kustomize edit set image shopsimple/api=<+variables.ecr_repo_base>.dkr.ecr.<+variables.aws_region>.amazonaws.com/api:<+variables.image_tag>
+                      kustomize edit set image shopsimple/worker=<+variables.ecr_repo_base>.dkr.ecr.<+variables.aws_region>.amazonaws.com/worker:<+variables.image_tag>
+
+              - step:
+                  name: Deploy to Staging
+                  identifier: kubectl_apply_staging
+                  type: K8sApply
+                  timeout: 10m
+                  spec:
+                    flags: "-k k8s/environments/staging"
+                    prune: true
+                    applyTimeout: 10m
+
+              - step:
+                  name: Wait for Rollout
+                  identifier: wait_rollout_staging
+                  type: Command
+                  timeout: 5m
+                  spec:
+                    shell: Bash
+                    command: |
+                      kubectl rollout status deployment/frontend -n shopsimple-staging --timeout=300s
+                      kubectl rollout status deployment/api -n shopsimple-staging --timeout=300s
+                      kubectl rollout status deployment/worker -n shopsimple-staging --timeout=300s
+
+              - step:
+                  name: Smoke Tests
+                  identifier: smoke_tests_staging
+                  type: Command
+                  timeout: 10m
+                  spec:
+                    shell: Bash
+                    command: |
+                      echo "Running smoke tests..."
+                      curl -f http://api.staging.shopsimple.com/health || exit 1
+                      curl -f http://frontend.staging.shopsimple.com/ || exit 1
+        when:
+          stageConditionType: CONDITION
+          condition: <+variables.environment> == "staging" || <+variables.environment> == "all"
+
+    # ============================================
+    # Stage 9: Deploy to Prod (Canary)
+    # ============================================
+    - stage:
+        name: Deploy to Prod
+        identifier: deploy_prod
+        description: Deploy to production with canary deployment
+        type: Deployment
+        spec:
+          deploymentType: Kubernetes
+          kubernetes:
+            namespace: shopsimple-prod
+          execution:
+            steps:
+              - step:
+                  name: Manual Approval
+                  identifier: prod_approval
+                  type: HarnessApproval
+                  timeout: 24h
+                  spec:
+                    approvalMessage: "Approve production deployment - canary 25%"
+                    approvers:
+                      userGroups:
+                        - release-managers
+                        - security-team
+                    includePipelineExecutionHistory: true
+
+              # Canary 25%
+              - step:
+                  name: Canary 25%
+                  identifier: canary_25
+                  type: Command
+                  timeout: 5m
+                  spec:
+                    shell: Bash
+                    command: |
+                      echo "Deploying canary 25%..."
+                      cd k8s/environments/prod
+                      # Update replicas for canary
+                      kustomize edit set image shopsimple/frontend=<+variables.ecr_repo_base>.dkr.ecr.<+variables.aws_region>.amazonaws.com/frontend:<+variables.image_tag>
+                      kustomize edit set image shopsimple/api=<+variables.ecr_repo_base>.dkr.ecr.<+variables.aws_region>.amazonaws.com/api:<+variables.image_tag>
+                      kustomize edit set image shopsimple/worker=<+variables.ecr_repo_base>.dkr.ecr.<+variables.aws_region>.amazonaws.com/worker:<+variables.image_tag>
+                      # Apply canary configuration
+                      kubectl apply -k k8s/environments/prod/overlays/canary-25
+              - step:
+                  name: Verify Canary 25%
+                  identifier: verify_canary_25
+                  type: Command
+                  timeout: 10m
+                  spec:
+                    shell: Bash
+                    command: |
+                      echo "Verifying canary 25%..."
+                      sleep 60
+                      # Check error rates
+                      kubectl exec -n shopsimple-prod deployment/api -- curl -s localhost:8080/metrics | grep http_requests_total || true
+                      # Check health
+                      curl -f http://api.shopsimple.com/health || exit 1
+              - step:
+                  name: Manual Approval 50%
+                  identifier: prod_approval_50
+                  type: HarnessApproval
+                  timeout: 24h
+                  spec:
+                    approvalMessage: "Approve canary 50%"
+                    approvers:
+                      userGroups:
+                        - release-managers
+                    includePipelineExecutionHistory: true
+
+              # Canary 50%
+              - step:
+                  name: Canary 50%
+                  identifier: canary_50
+                  type: Command
+                  timeout: 5m
+                  spec:
+                    shell: Bash
+                    command: |
+                      echo "Deploying canary 50%..."
+                      kubectl apply -k k8s/environments/prod/overlays/canary-50
+              - step:
+                  name: Verify Canary 50%
+                  identifier: verify_canary_50
+                  type: Command
+                  timeout: 10m
+                  spec:
+                    shell: Bash
+                    command: |
+                      echo "Verifying canary 50%..."
+                      sleep 60
+                      curl -f http://api.shopsimple.com/health || exit 1
+
+              - step:
+                  name: Manual Approval 100%
+                  identifier: prod_approval_100
+                  type: HarnessApproval
+                  timeout: 24h
+                  spec:
+                    approvalMessage: "Approve full rollout 100%"
+                    approvers:
+                      userGroups:
+                        - release-managers
+                    includePipelineExecutionHistory: true
+
+              # Full rollout
+              - step:
+                  name: Full Rollout 100%
+                  identifier: full_rollout
+                  type: Command
+                  timeout: 10m
+                  spec:
+                    shell: Bash
+                    command: |
+                      echo "Deploying full 100%..."
+                      kubectl apply -k k8s/environments/prod
+                      kubectl rollout status deployment/frontend -n shopsimple-prod --timeout=300s
+                      kubectl rollout status deployment/api -n shopsimple-prod --timeout=300s
+                      kubectl rollout status deployment/worker -n shopsimple-prod --timeout=300s
+              - step:
+                  name: Final Health Check
+                  identifier: final_health_check
+                  type: Command
+                  timeout: 5m
+                  spec:
+                    shell: Bash
+                    command: |
+                      echo "Running final health checks..."
+                      curl -f http://api.shopsimple.com/health || exit 1
+                      curl -f http://frontend.shopsimple.com/ || exit 1
+        failureStrategies:
+          - onFailure:
+              action:
+                type: StageRollback
+              onFailures:
+                - identifier: canary_25
+                - identifier: canary_50
+                - identifier: full_rollout
+        when:
+          stageConditionType: CONDITION
+          condition: <+variables.environment> == "prod" || <+variables.environment> == "all"
+
+  notifications:
+    - name: Pipeline Notifications
+      pipelineEvents:
+        - event:
+            - PipelineComplete
+            - PipelineFailed
+      notificationRule:
+        identifier: default_notifications
+        actions:
+          - name: Email Notification
+            type: Email
+            spec:
+              to:
+                - devops@shopsimple.com
+                - release-team@shopsimple.com
+              subject: "ShopSimple Service Pipeline: <+pipeline.stagestatus>"
